@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>シューティングゲーム</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a1a;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'Courier New', monospace;
+      color: #fff;
+      user-select: none;
+    }
+    h1 {
+      font-size: 1.6rem;
+      letter-spacing: 0.2em;
+      margin-bottom: 10px;
+      color: #00e5ff;
+      text-shadow: 0 0 12px #00e5ff;
+    }
+    #hud {
+      display: flex;
+      gap: 40px;
+      margin-bottom: 8px;
+      font-size: 1rem;
+      letter-spacing: 0.1em;
+    }
+    #hud span { color: #ffe600; text-shadow: 0 0 6px #ffe600; }
+    canvas {
+      border: 2px solid #00e5ff;
+      box-shadow: 0 0 24px #00e5ff88;
+      display: block;
+      background: #000018;
+    }
+    #message {
+      margin-top: 14px;
+      font-size: 1.1rem;
+      min-height: 1.5em;
+      color: #ff4081;
+      text-shadow: 0 0 8px #ff4081;
+      letter-spacing: 0.15em;
+    }
+    #controls {
+      margin-top: 10px;
+      font-size: 0.78rem;
+      color: #aaa;
+      text-align: center;
+      line-height: 1.8;
+    }
+  </style>
+</head>
+<body>
+  <h1>🚀 シューティングゲーム</h1>
+  <div id="hud">
+    <div>スコア: <span id="score">0</span></div>
+    <div>レベル: <span id="level">1</span></div>
+    <div>ライフ: <span id="lives">❤️❤️❤️</span></div>
+  </div>
+  <canvas id="canvas" width="480" height="600"></canvas>
+  <div id="message">スペース / タップ で開始</div>
+  <div id="controls">
+    ← → / A D : 移動 &nbsp;|&nbsp; スペース / Z : 射撃<br>
+    モバイル: 画面下部をタッチ操作
+  </div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const levelEl = document.getElementById('level');
+    const livesEl = document.getElementById('lives');
+    const messageEl = document.getElementById('message');
+
+    const W = canvas.width;
+    const H = canvas.height;
+
+    // ─── State ───────────────────────────────────────────────────────────────
+    let state = 'idle'; // 'idle' | 'playing' | 'dead' | 'gameover'
+    let score = 0;
+    let lives = 3;
+    let level = 1;
+    let frameCount = 0;
+
+    // ─── Stars (background) ───────────────────────────────────────────────────
+    const STAR_COUNT = 80;
+    const stars = Array.from({ length: STAR_COUNT }, () => ({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: Math.random() * 1.5 + 0.3,
+      speed: Math.random() * 0.6 + 0.2,
+    }));
+
+    // ─── Player ───────────────────────────────────────────────────────────────
+    const player = {
+      x: W / 2,
+      y: H - 60,
+      w: 36,
+      h: 36,
+      speed: 4.5,
+      cooldown: 0,
+    };
+
+    // ─── Collections ──────────────────────────────────────────────────────────
+    let bullets = [];
+    let enemies = [];
+    let enemyBullets = [];
+    let particles = [];
+
+    // ─── Input ────────────────────────────────────────────────────────────────
+    const keys = {};
+    document.addEventListener('keydown', e => {
+      keys[e.code] = true;
+      if ((e.code === 'Space' || e.code === 'KeyZ') && state === 'idle') startGame();
+      if ((e.code === 'Space' || e.code === 'KeyZ') && state === 'gameover') startGame();
+    });
+    document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+    // Touch controls
+    let touchLeft = false, touchRight = false, touchShoot = false;
+    canvas.addEventListener('touchstart', handleTouch, { passive: false });
+    canvas.addEventListener('touchmove', handleTouch, { passive: false });
+    canvas.addEventListener('touchend', e => {
+      touchLeft = touchRight = touchShoot = false;
+      if (state === 'idle' || state === 'gameover') startGame();
+      e.preventDefault();
+    }, { passive: false });
+
+    function handleTouch(e) {
+      e.preventDefault();
+      touchLeft = touchRight = touchShoot = false;
+      for (const t of e.touches) {
+        const rect = canvas.getBoundingClientRect();
+        const tx = t.clientX - rect.left;
+        const ty = t.clientY - rect.top;
+        if (ty > H * 0.6) {
+          if (tx < W / 3) touchLeft = true;
+          else if (tx > W * 2 / 3) touchRight = true;
+          else touchShoot = true;
+        }
+      }
+    }
+
+    // ─── Game control ─────────────────────────────────────────────────────────
+    function startGame() {
+      state = 'playing';
+      score = 0;
+      lives = 3;
+      level = 1;
+      frameCount = 0;
+      bullets = [];
+      enemies = [];
+      enemyBullets = [];
+      particles = [];
+      player.x = W / 2;
+      player.y = H - 60;
+      player.cooldown = 0;
+      messageEl.textContent = '';
+      updateHUD();
+    }
+
+    function updateHUD() {
+      scoreEl.textContent = score;
+      levelEl.textContent = level;
+      livesEl.textContent = '❤️'.repeat(lives);
+    }
+
+    // ─── Constants ────────────────────────────────────────────────────────────
+    const MIN_SPAWN_RATE = 28;
+    const BASE_SPAWN_RATE = 70;
+    const BASE_ENEMY_SHOOT_INTERVAL = 80;
+
+    function enemyWeightsForLevel(lv) {
+      if (lv < 3) return [0.8, 0.2, 0];
+      if (lv < 6) return [0.5, 0.35, 0.15];
+      return [0.3, 0.4, 0.3];
+    }
+
+    // ─── Spawn enemies ────────────────────────────────────────────────────────
+    function spawnEnemy() {
+      const weights = enemyWeightsForLevel(level);
+      const r = Math.random();
+      let type = 'basic';
+      if (r > weights[0] + weights[1]) type = 'tank';
+      else if (r > weights[0]) type = 'fast';
+
+      const cfg = {
+        basic: { w: 30, h: 24, hp: 1, maxHp: 1, speed: 1.2 + level * 0.15, color: '#ff4081', score: 10 },
+        fast:  { w: 22, h: 18, hp: 1, maxHp: 1, speed: 2.2 + level * 0.2,  color: '#76ff03', score: 20 },
+        tank:  { w: 40, h: 32, hp: 3, maxHp: 3, speed: 0.9 + level * 0.1,  color: '#ff9800', score: 50 },
+      }[type];
+
+      enemies.push({
+        x: Math.random() * (W - cfg.w) + cfg.w / 2,
+        y: -cfg.h,
+        ...cfg,
+        type,
+        shootTimer: Math.floor(Math.random() * 120),
+      });
+    }
+
+    // ─── Shoot ───────────────────────────────────────────────────────────────
+    function playerShoot() {
+      if (player.cooldown > 0) return;
+      bullets.push({ x: player.x, y: player.y - player.h / 2, r: 4, speed: 9, color: '#00e5ff' });
+      player.cooldown = 14;
+    }
+
+    function enemyShoot(e) {
+      enemyBullets.push({ x: e.x, y: e.y + e.h / 2, r: 4, speed: 3 + level * 0.2, color: '#ff6d00' });
+    }
+
+    // ─── Particles ───────────────────────────────────────────────────────────
+    function explode(x, y, color, count = 16) {
+      for (let i = 0; i < count; i++) {
+        const angle = (Math.PI * 2 * i) / count + Math.random() * 0.5;
+        const speed = Math.random() * 3 + 1;
+        particles.push({
+          x, y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 1,
+          decay: Math.random() * 0.03 + 0.02,
+          r: Math.random() * 3 + 1,
+          color,
+        });
+      }
+    }
+
+    // ─── Collision (AABB) ─────────────────────────────────────────────────────
+    function hitRect(ax, ay, aw, ah, bx, by, bw, bh) {
+      return ax - aw / 2 < bx + bw / 2 &&
+             ax + aw / 2 > bx - bw / 2 &&
+             ay - ah / 2 < by + bh / 2 &&
+             ay + ah / 2 > by - bh / 2;
+    }
+
+    function hitCircleRect(cx, cy, cr, rx, ry, rw, rh) {
+      const nearX = Math.max(rx - rw / 2, Math.min(cx, rx + rw / 2));
+      const nearY = Math.max(ry - rh / 2, Math.min(cy, ry + rh / 2));
+      const dx = cx - nearX, dy = cy - nearY;
+      return dx * dx + dy * dy < cr * cr;
+    }
+
+    // ─── Update ───────────────────────────────────────────────────────────────
+    function update() {
+      if (state !== 'playing') return;
+      frameCount++;
+
+      // Level up every 500 points
+      const newLevel = Math.floor(score / 500) + 1;
+      if (newLevel !== level) { level = newLevel; updateHUD(); }
+
+      // Stars
+      for (const s of stars) {
+        s.y += s.speed;
+        if (s.y > H) { s.y = 0; s.x = Math.random() * W; }
+      }
+
+      // Player movement
+      if (keys['ArrowLeft'] || keys['KeyA'] || touchLeft)
+        player.x = Math.max(player.w / 2, player.x - player.speed);
+      if (keys['ArrowRight'] || keys['KeyD'] || touchRight)
+        player.x = Math.min(W - player.w / 2, player.x + player.speed);
+      if (player.cooldown > 0) player.cooldown--;
+      if (keys['Space'] || keys['KeyZ'] || touchShoot) playerShoot();
+
+      // Spawn enemies
+      const spawnRate = Math.max(MIN_SPAWN_RATE, BASE_SPAWN_RATE - level * 5);
+      if (frameCount % spawnRate === 0) spawnEnemy();
+
+      // Bullets
+      bullets = bullets.filter(b => b.y > -b.r);
+      for (const b of bullets) b.y -= b.speed;
+
+      // Enemy bullets
+      enemyBullets = enemyBullets.filter(b => b.y < H + b.r);
+      for (const b of enemyBullets) b.y += b.speed;
+
+      // Enemies
+      enemies = enemies.filter(e => e.y < H + e.h);
+      for (const e of enemies) {
+        e.y += e.speed;
+        e.shootTimer--;
+        if (e.shootTimer <= 0) {
+          if (Math.random() < 0.3 + level * 0.05) enemyShoot(e);
+          e.shootTimer = Math.floor(BASE_ENEMY_SHOOT_INTERVAL / (1 + level * 0.1));
+        }
+      }
+
+      // Bullet vs enemy
+      for (let bi = bullets.length - 1; bi >= 0; bi--) {
+        const b = bullets[bi];
+        for (let ei = enemies.length - 1; ei >= 0; ei--) {
+          const e = enemies[ei];
+          if (hitCircleRect(b.x, b.y, b.r, e.x, e.y, e.w, e.h)) {
+            bullets.splice(bi, 1);
+            e.hp--;
+            explode(b.x, b.y, '#fff', 6);
+            if (e.hp <= 0) {
+              score += e.score;
+              explode(e.x, e.y, e.color, 20);
+              enemies.splice(ei, 1);
+              updateHUD();
+            }
+            break;
+          }
+        }
+      }
+
+      // Enemy bullet vs player
+      for (let bi = enemyBullets.length - 1; bi >= 0; bi--) {
+        const b = enemyBullets[bi];
+        if (hitCircleRect(b.x, b.y, b.r, player.x, player.y, player.w, player.h)) {
+          enemyBullets.splice(bi, 1);
+          playerHit();
+        }
+      }
+
+      // Enemy vs player (collision)
+      for (let ei = enemies.length - 1; ei >= 0; ei--) {
+        const e = enemies[ei];
+        if (hitRect(e.x, e.y, e.w, e.h, player.x, player.y, player.w, player.h)) {
+          explode(e.x, e.y, e.color, 20);
+          enemies.splice(ei, 1);
+          playerHit();
+        }
+      }
+
+      // Particles
+      for (const p of particles) {
+        p.x += p.vx; p.y += p.vy;
+        p.vx *= 0.95; p.vy *= 0.95;
+        p.life -= p.decay;
+      }
+      particles = particles.filter(p => p.life > 0);
+    }
+
+    function playerHit() {
+      explode(player.x, player.y, '#ff4081', 24);
+      lives--;
+      updateHUD();
+      if (lives <= 0) {
+        state = 'gameover';
+        messageEl.textContent = `ゲームオーバー！ スコア: ${score}　[スペース/タップで再挑戦]`;
+      } else {
+        state = 'dead';
+        setTimeout(() => {
+          if (state === 'dead') { state = 'playing'; player.x = W / 2; }
+        }, 1200);
+      }
+    }
+
+    // ─── Draw ─────────────────────────────────────────────────────────────────
+    function drawStars() {
+      for (const s of stars) {
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,255,255,${0.4 + s.r * 0.3})`;
+        ctx.fill();
+      }
+    }
+
+    function drawPlayer() {
+      if (state === 'dead' && Math.floor(frameCount / 5) % 2 === 0) return;
+      const x = player.x, y = player.y;
+      // Engine glow
+      ctx.beginPath();
+      ctx.arc(x, y + player.h / 2 - 2, 8 + Math.random() * 4, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,180,255,0.25)';
+      ctx.fill();
+
+      // Body
+      ctx.fillStyle = '#00e5ff';
+      ctx.beginPath();
+      ctx.moveTo(x, y - player.h / 2);
+      ctx.lineTo(x + player.w / 2, y + player.h / 2);
+      ctx.lineTo(x + player.w / 4, y + player.h / 4);
+      ctx.lineTo(x - player.w / 4, y + player.h / 4);
+      ctx.lineTo(x - player.w / 2, y + player.h / 2);
+      ctx.closePath();
+      ctx.fill();
+
+      // Cockpit
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(x, y - 2, 5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Wings
+      ctx.fillStyle = '#0097a7';
+      ctx.beginPath();
+      ctx.moveTo(x - player.w / 4, y + player.h / 4);
+      ctx.lineTo(x - player.w * 0.75, y + player.h / 2);
+      ctx.lineTo(x - player.w / 4, y + player.h / 2 - 4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(x + player.w / 4, y + player.h / 4);
+      ctx.lineTo(x + player.w * 0.75, y + player.h / 2);
+      ctx.lineTo(x + player.w / 4, y + player.h / 2 - 4);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawEnemy(e) {
+      const x = e.x, y = e.y;
+      ctx.fillStyle = e.color;
+      if (e.type === 'fast') {
+        // Diamond shape
+        ctx.beginPath();
+        ctx.moveTo(x, y - e.h / 2);
+        ctx.lineTo(x + e.w / 2, y);
+        ctx.lineTo(x, y + e.h / 2);
+        ctx.lineTo(x - e.w / 2, y);
+        ctx.closePath();
+      } else if (e.type === 'tank') {
+        // Rounded rect-ish with extra wings
+        ctx.beginPath();
+        ctx.moveTo(x, y + e.h / 2);
+        ctx.lineTo(x + e.w * 0.7, y + e.h / 2);
+        ctx.lineTo(x + e.w / 2, y - e.h / 2);
+        ctx.lineTo(x - e.w / 2, y - e.h / 2);
+        ctx.lineTo(x - e.w * 0.7, y + e.h / 2);
+        ctx.closePath();
+      } else {
+        // Basic invader-like
+        ctx.beginPath();
+        ctx.moveTo(x - e.w / 2, y + e.h / 2);
+        ctx.lineTo(x - e.w / 4, y - e.h / 2);
+        ctx.lineTo(x + e.w / 4, y - e.h / 2);
+        ctx.lineTo(x + e.w / 2, y + e.h / 2);
+        ctx.closePath();
+      }
+      ctx.fill();
+
+      // HP bar for tank
+      if (e.type === 'tank' && e.hp < e.maxHp) {
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(x - e.w / 2, y - e.h / 2 - 7, e.w, 4);
+        ctx.fillStyle = '#76ff03';
+        ctx.fillRect(x - e.w / 2, y - e.h / 2 - 7, (e.w * e.hp) / e.maxHp, 4);
+      }
+    }
+
+    function drawBullet(b, color) {
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 8;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    function drawParticles() {
+      for (const p of particles) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI * 2);
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.life;
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawIdle() {
+      ctx.fillStyle = 'rgba(0,229,255,0.12)';
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#00e5ff';
+      ctx.font = 'bold 2rem "Courier New"';
+      ctx.textAlign = 'center';
+      ctx.shadowColor = '#00e5ff';
+      ctx.shadowBlur = 18;
+      ctx.fillText('🚀 シューティングゲーム', W / 2, H / 2 - 30);
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#fff';
+      ctx.font = '1rem "Courier New"';
+      ctx.fillText('スペースキー / 画面タップ で開始', W / 2, H / 2 + 20);
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+      drawStars();
+
+      if (state === 'idle') { drawIdle(); return; }
+
+      // Draw enemies
+      for (const e of enemies) drawEnemy(e);
+
+      // Draw bullets
+      for (const b of bullets) drawBullet(b, b.color);
+      for (const b of enemyBullets) drawBullet(b, b.color);
+
+      drawParticles();
+      drawPlayer();
+
+      // Game over overlay
+      if (state === 'gameover') {
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = '#ff4081';
+        ctx.font = 'bold 2.2rem "Courier New"';
+        ctx.textAlign = 'center';
+        ctx.shadowColor = '#ff4081';
+        ctx.shadowBlur = 20;
+        ctx.fillText('GAME OVER', W / 2, H / 2 - 20);
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#ffe600';
+        ctx.font = '1.1rem "Courier New"';
+        ctx.fillText(`スコア: ${score}`, W / 2, H / 2 + 20);
+        ctx.fillStyle = '#aaa';
+        ctx.font = '0.9rem "Courier New"';
+        ctx.fillText('スペース / タップ で再挑戦', W / 2, H / 2 + 52);
+      }
+    }
+
+    // ─── Loop ─────────────────────────────────────────────────────────────────
+    function loop() {
+      update();
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    // Draw initial star field + idle screen immediately
+    drawStars();
+    drawIdle();
+    loop();
+  </script>
+</body>
+</html>
