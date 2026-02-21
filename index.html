@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>シューティングゲーム</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      font-family: 'Noto Sans JP', 'Courier New', 'Noto Sans CJK JP', 'BIZ UDGothic', 'Yu Gothic', 'Hiragino Sans', 'Meiryo', sans-serif;
+      color: #fff;
+    }
+    #gameCanvas {
+      border: 2px solid #0ff;
+      box-shadow: 0 0 20px #0ff4;
+      display: block;
+    }
+    #canvasWrap {
+      position: relative;
+    }
+    #overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.65);
+      gap: 24px;
+      pointer-events: none;
+    }
+    #overlay.hidden { display: none; }
+    #overlayTitle {
+      font-size: 36px;
+      font-weight: bold;
+      color: #0ff;
+      text-shadow: 0 0 18px #0ff;
+      letter-spacing: 2px;
+      text-align: center;
+    }
+    #overlaySub {
+      font-size: 18px;
+      color: #fff;
+      text-align: center;
+    }
+    #ui {
+      display: flex;
+      gap: 40px;
+      margin-bottom: 10px;
+      font-size: 18px;
+      letter-spacing: 2px;
+    }
+    #ui span { color: #0ff; }
+    #message {
+      margin-top: 14px;
+      font-size: 14px;
+      color: #888;
+      letter-spacing: 1px;
+    }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div>スコア: <span id="scoreDisplay">0</span></div>
+    <div>残機: <span id="livesDisplay">3</span></div>
+    <div>レベル: <span id="levelDisplay">1</span></div>
+  </div>
+  <div id="canvasWrap">
+    <canvas id="gameCanvas" width="480" height="600"></canvas>
+    <div id="overlay">
+      <div id="overlayTitle">シューティングゲーム</div>
+      <div id="overlaySub">Enter でスタート</div>
+    </div>
+  </div>
+  <div id="message">← → または A D で移動 &nbsp;|&nbsp; スペースで射撃</div>
+
+  <script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+
+    // ─── State ───────────────────────────────────────────────
+    let score, lives, level, enemySpeed, spawnInterval, frameCount;
+    let player, bullets, enemies, particles;
+    let keys = {};
+    let gameOver = false;
+    let started = false;
+    let shootCooldown = 0;
+    const SHOOT_DELAY = 15;        // frames between shots
+    const PLAYER_HITBOX_SCALE = 0.7; // shrinks hitbox for forgiving collisions
+    const BULLET_W = 4, BULLET_H = 16;
+    const SCORE_PER_LEVEL = 500;
+
+    // ─── Helpers ─────────────────────────────────────────────
+    function rand(min, max) { return Math.random() * (max - min) + min; }
+    function randInt(min, max) { return Math.floor(rand(min, max + 1)); }
+
+    // ─── Init ─────────────────────────────────────────────────
+    function init() {
+      score = 0;
+      lives = 3;
+      level = 1;
+      enemySpeed = 1.2;
+      spawnInterval = 90;
+      frameCount = 0;
+      gameOver = false;
+      player = { x: W / 2, y: H - 60, w: 36, h: 36, speed: 5 };
+      bullets = [];
+      enemies = [];
+      particles = [];
+      updateUI();
+    }
+
+    function updateUI() {
+      document.getElementById('scoreDisplay').textContent = score;
+      document.getElementById('livesDisplay').textContent = lives;
+      document.getElementById('levelDisplay').textContent = level;
+    }
+
+    // ─── Drawing ──────────────────────────────────────────────
+    function drawPlayer() {
+      const { x, y, w, h } = player;
+      // Engine glow
+      ctx.save();
+      ctx.shadowColor = '#0ff';
+      ctx.shadowBlur = 18;
+      // Body
+      ctx.fillStyle = '#0af';
+      ctx.beginPath();
+      ctx.moveTo(x, y - h / 2);          // nose
+      ctx.lineTo(x - w / 2, y + h / 2);  // left wing tip
+      ctx.lineTo(x - w / 4, y + h / 4);  // left inner
+      ctx.lineTo(x, y + h / 2);           // tail center
+      ctx.lineTo(x + w / 4, y + h / 4);  // right inner
+      ctx.lineTo(x + w / 2, y + h / 2);  // right wing tip
+      ctx.closePath();
+      ctx.fill();
+      // Cockpit
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.ellipse(x, y - h / 6, w / 8, h / 7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawEnemy(e) {
+      ctx.save();
+      ctx.shadowColor = '#f50';
+      ctx.shadowBlur = 14;
+      ctx.fillStyle = '#f84';
+      ctx.beginPath();
+      ctx.moveTo(e.x, e.y + e.h / 2);         // nose (pointing down)
+      ctx.lineTo(e.x - e.w / 2, e.y - e.h / 2);
+      ctx.lineTo(e.x - e.w / 4, e.y);
+      ctx.lineTo(e.x, e.y - e.h / 4);
+      ctx.lineTo(e.x + e.w / 4, e.y);
+      ctx.lineTo(e.x + e.w / 2, e.y - e.h / 2);
+      ctx.closePath();
+      ctx.fill();
+      // Eye
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.ellipse(e.x, e.y - e.h / 8, e.w / 7, e.h / 7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawBullet(b) {
+      ctx.save();
+      ctx.shadowColor = '#ff0';
+      ctx.shadowBlur = 10;
+      ctx.fillStyle = '#ff0';
+      ctx.fillRect(b.x - BULLET_W / 2, b.y - BULLET_H / 2, BULLET_W, BULLET_H);
+      ctx.restore();
+    }
+
+    function drawParticles() {
+      particles.forEach(p => {
+        ctx.save();
+        ctx.globalAlpha = p.life / p.maxLife;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      });
+    }
+
+    function drawStars() {
+      // Simple scrolling star field stored on canvas itself via a pre-built list
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      stars.forEach(s => {
+        s.y += s.speed;
+        if (s.y > H) { s.y = 0; s.x = rand(0, W); }
+        ctx.fillRect(s.x, s.y, s.r, s.r);
+      });
+    }
+
+    // ─── Stars ────────────────────────────────────────────────
+    const stars = Array.from({ length: 80 }, () => ({
+      x: rand(0, W),
+      y: rand(0, H),
+      r: rand(0.5, 2),
+      speed: rand(0.3, 1.2)
+    }));
+
+    // ─── Particles ────────────────────────────────────────────
+    function spawnExplosion(x, y, color) {
+      const count = 14;
+      for (let i = 0; i < count; i++) {
+        const angle = (i / count) * Math.PI * 2;
+        const speed = rand(1, 4);
+        particles.push({
+          x, y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          r: rand(2, 5),
+          color,
+          life: 40,
+          maxLife: 40
+        });
+      }
+    }
+
+    // ─── Spawning ─────────────────────────────────────────────
+    function spawnEnemy() {
+      const w = 32, h = 32;
+      enemies.push({
+        x: rand(w / 2 + 10, W - w / 2 - 10),
+        y: -h,
+        w, h,
+        speed: enemySpeed + rand(-0.3, 0.3)
+      });
+    }
+
+    // ─── Shooting ─────────────────────────────────────────────
+    function shoot() {
+      bullets.push({ x: player.x, y: player.y - player.h / 2, speed: 10 });
+    }
+
+    // ─── Collision ────────────────────────────────────────────
+    function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+      return Math.abs(ax - bx) < (aw + bw) / 2 &&
+             Math.abs(ay - by) < (ah + bh) / 2;
+    }
+
+    // ─── Level Up ─────────────────────────────────────────────
+    function checkLevelUp() {
+      const threshold = level * SCORE_PER_LEVEL;
+      if (score >= threshold) {
+        level++;
+        enemySpeed += 0.4;
+        spawnInterval = Math.max(30, spawnInterval - 10);
+        updateUI();
+      }
+    }
+
+    // ─── Screens ──────────────────────────────────────────────
+    const overlay      = document.getElementById('overlay');
+    const overlayTitle = document.getElementById('overlayTitle');
+    const overlaySub   = document.getElementById('overlaySub');
+
+    function showOverlay(title, sub) {
+      overlayTitle.textContent = title;
+      overlaySub.textContent   = sub;
+      overlay.classList.remove('hidden');
+    }
+    function hideOverlay() {
+      overlay.classList.add('hidden');
+    }
+
+    // ─── Main Loop ────────────────────────────────────────────
+    function update() {
+      if (!started || gameOver) return;
+
+      frameCount++;
+
+      // Player movement
+      if ((keys['ArrowLeft'] || keys['a'] || keys['A']) && player.x - player.w / 2 > 0) {
+        player.x -= player.speed;
+      }
+      if ((keys['ArrowRight'] || keys['d'] || keys['D']) && player.x + player.w / 2 < W) {
+        player.x += player.speed;
+      }
+
+      // Shooting
+      if (shootCooldown > 0) shootCooldown--;
+      if ((keys[' '] || keys['Space']) && shootCooldown === 0) {
+        shoot();
+        shootCooldown = SHOOT_DELAY;
+      }
+
+      // Move bullets
+      bullets = bullets.filter(b => b.y > -10);
+      bullets.forEach(b => { b.y -= b.speed; });
+
+      // Spawn enemies
+      if (frameCount % spawnInterval === 0) spawnEnemy();
+
+      // Move enemies
+      enemies.forEach(e => { e.y += e.speed; });
+
+      // Enemy off-screen → lose a life
+      enemies = enemies.filter(e => {
+        if (e.y - e.h / 2 > H) {
+          lives--;
+          updateUI();
+          if (lives <= 0) {
+            gameOver = true;
+            showOverlay('GAME OVER', `スコア: ${score}　Enter で再スタート`);
+          }
+          return false;
+        }
+        return true;
+      });
+
+      // Bullet–enemy collisions
+      bullets = bullets.filter(b => {
+        for (let i = enemies.length - 1; i >= 0; i--) {
+          const e = enemies[i];
+          if (rectsOverlap(b.x, b.y, BULLET_W, BULLET_H, e.x, e.y, e.w, e.h)) {
+            spawnExplosion(e.x, e.y, '#f84');
+            enemies.splice(i, 1);
+            score += 100;
+            updateUI();
+            checkLevelUp();
+            return false; // remove bullet
+          }
+        }
+        return true;
+      });
+
+      // Enemy–player collisions
+      enemies = enemies.filter(e => {
+        if (rectsOverlap(player.x, player.y, player.w * PLAYER_HITBOX_SCALE, player.h * PLAYER_HITBOX_SCALE, e.x, e.y, e.w, e.h)) {
+          spawnExplosion(e.x, e.y, '#f00');
+          spawnExplosion(player.x, player.y, '#0ff');
+          lives--;
+          updateUI();
+          if (lives <= 0) {
+            gameOver = true;
+            showOverlay('GAME OVER', `スコア: ${score}　Enter で再スタート`);
+          }
+          return false;
+        }
+        return true;
+      });
+
+      // Update particles
+      particles.forEach(p => {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life--;
+      });
+      particles = particles.filter(p => p.life > 0);
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+
+      // Background
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, W, H);
+
+      drawStars();
+      drawParticles();
+
+      if (!started) return;
+
+      bullets.forEach(drawBullet);
+      enemies.forEach(drawEnemy);
+      drawPlayer();
+    }
+
+    function loop() {
+      update();
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    // ─── Input ────────────────────────────────────────────────
+    document.addEventListener('keydown', e => {
+      keys[e.key] = true;
+      if (e.key === 'Enter') {
+        if (!started) {
+          started = true;
+          hideOverlay();
+          init();
+        } else if (gameOver) {
+          started = true;
+          hideOverlay();
+          init();
+        }
+      }
+      // Prevent page scroll on space/arrows
+      if ([' ', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+        e.preventDefault();
+      }
+    });
+    document.addEventListener('keyup', e => { keys[e.key] = false; });
+
+    // ─── Boot ─────────────────────────────────────────────────
+    init();
+    started = false; // show start screen first
+    document.fonts.ready.then(() => loop());
+  </script>
+</body>
+</html>
